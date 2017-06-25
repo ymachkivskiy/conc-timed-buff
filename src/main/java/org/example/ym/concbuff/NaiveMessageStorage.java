@@ -29,39 +29,49 @@ public class NaiveMessageStorage implements MessageStorage {
     }
 
     @Override
-    public synchronized void storeMessage(Message message) {
-        messages.add(MessageWithTimestamp.wrapp(message));
+    public void storeMessage(Message message) {
+        MessageWithTimestamp wrappedMsg = MessageWithTimestamp.wrapp(message);
+
+        synchronized (this) {
+            messages.add(wrappedMsg);
+        }
     }
 
     @Override
     public synchronized List<Message> queryLatest(int quantity) {
         final Instant lastAcceptable = Instant.now().minus(keepAliveDuration);
 
-        if (quantity <= 0 || messages.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        int startIdx = 0;
-        while (startIdx < messages.size() && messages.get(startIdx).timestamp.isBefore(lastAcceptable)) {
-            startIdx++;
-        }
-
         List<MessageWithTimestamp> result;
-        if(startIdx < messages.size()){
-            messages = new ArrayList<>(messages.subList(startIdx, messages.size()));
-            result = messages.subList(Math.max(0, messages.size() - quantity), messages.size());
-        }
-        else{
-            messages = new ArrayList<>();
-            result = Collections.emptyList();
+
+        synchronized (this){
+
+            if (quantity <= 0 || messages.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            int startIdx = 0;
+            while (startIdx < messages.size() && messages.get(startIdx).timestamp.isBefore(lastAcceptable)) {
+                startIdx++;
+            }
+
+            if(startIdx < messages.size()){
+                messages = new ArrayList<>(messages.subList(startIdx, messages.size()));
+                result = messages.subList(Math.max(0, messages.size() - quantity), messages.size());
+            }
+            else{
+                messages = new ArrayList<>();
+                result = Collections.emptyList();
+            }
+
         }
 
         return result.stream().map(MessageWithTimestamp::getMessage).collect(toList());
     }
 
     @Override
-    public synchronized int countLatestMatching(int quantity, Predicate<Message> predicate) {
-        return (int) queryLatest(quantity).stream().filter(predicate).count();
+    public int countLatestMatching(int quantity, Predicate<Message> predicate) {
+        List<Message> latestMessages = queryLatest(quantity);
+        return (int) latestMessages.stream().filter(predicate).count();
     }
 
     private static class MessageWithTimestamp{
