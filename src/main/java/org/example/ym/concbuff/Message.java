@@ -54,4 +54,9 @@ public final class Message {
     public int hashCode() {
         return Objects.hash(agentString, responseCode);
     }
+
+    @Override
+    public String toString() {
+        return "message{'" + agentString + "\'[" + responseCode + "]}";
+    }
 }
