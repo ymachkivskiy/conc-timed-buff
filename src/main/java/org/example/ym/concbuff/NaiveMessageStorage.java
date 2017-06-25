@@ -29,12 +29,12 @@ public class NaiveMessageStorage implements MessageStorage {
     }
 
     @Override
-    public void storeMessage(Message message) {
+    public synchronized void storeMessage(Message message) {
         messages.add(MessageWithTimestamp.wrapp(message));
     }
 
     @Override
-    public List<Message> queryLatest(int quantity) {
+    public synchronized List<Message> queryLatest(int quantity) {
         final Instant lastAcceptable = Instant.now().minus(keepAliveDuration);
 
         if (quantity <= 0 || messages.isEmpty()) {
@@ -60,7 +60,7 @@ public class NaiveMessageStorage implements MessageStorage {
     }
 
     @Override
-    public int countLatestMatching(int quantity, Predicate<Message> predicate) {
+    public synchronized int countLatestMatching(int quantity, Predicate<Message> predicate) {
         return (int) queryLatest(quantity).stream().filter(predicate).count();
     }
 

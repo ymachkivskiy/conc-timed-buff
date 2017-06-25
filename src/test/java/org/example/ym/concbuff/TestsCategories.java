@@ -5,3 +5,6 @@ interface BasicFunctionality {
 
 interface MessageKeepAliveFunctionality {
 }
+
+interface ConcurrencySafety {
+}

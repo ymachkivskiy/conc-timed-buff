@@ -117,6 +117,27 @@ public class MessageStorage_FunctionalTest {
 
     @Category(BasicFunctionality.class)
     @Test
+    public void shouldReturnAllStoredMessagesIfRequestedQuantityIsGreaterThanStoredMessagesCount_ExtremeNumber() {
+        //given
+        MessageStorage storage = MessageStorage.newStorage(1, TimeUnit.MINUTES);
+
+        Message m1 = message(),
+                m2 = message(),
+                m3 = message();
+
+        //when
+        storage.storeMessage(m1);
+        storage.storeMessage(m2);
+        storage.storeMessage(m3);
+
+        List<Message> messages = storage.queryLatest(Integer.MAX_VALUE);
+
+        //then
+        assertThat(messages).containsExactly(m1, m2, m3);
+    }
+
+    @Category(BasicFunctionality.class)
+    @Test
     public void shouldReturnSameMessagesForSubsequentQuerying() {
         //given
         MessageStorage storage = MessageStorage.newStorage(1, TimeUnit.MINUTES);
