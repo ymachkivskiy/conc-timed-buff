@@ -44,7 +44,7 @@ public class ConcurrentMessageStorageBenchmark
         }
     }
 
-    @Group("naiveStorageGroup") @GroupThreads(15)
+    @Group("concurrentStorageGroup") @GroupThreads(15)
     @Benchmark
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     @BenchmarkMode(Mode.Throughput)
@@ -56,7 +56,7 @@ public class ConcurrentMessageStorageBenchmark
         }
     }
 
-    @Group("naiveStorageGroup") @GroupThreads(15)
+    @Group("concurrentStorageGroup") @GroupThreads(15)
     @Benchmark
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     @BenchmarkMode(Mode.Throughput)
@@ -68,7 +68,7 @@ public class ConcurrentMessageStorageBenchmark
     }
 
 
-    @Group("naiveStorageGroup") @GroupThreads(25)
+    @Group("concurrentStorageGroup") @GroupThreads(25)
     @Benchmark
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     @BenchmarkMode(Mode.Throughput)
