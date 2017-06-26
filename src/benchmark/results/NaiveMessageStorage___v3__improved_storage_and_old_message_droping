@@ -1,0 +1,24 @@
+Result: 1576.458 ±(99.9%) 209.533 ops/ms [Average]
+  Statistics: (min, avg, max) = (1156.531, 1576.458, 2094.957), stdev = 313.620
+  Confidence interval (99.9%): [1366.925, 1785.991]
+
+Result "checkingMessagesWithErrors": 69.088 ±(99.9%) 9.664 ops/ms [Average]
+  Statistics: (min, avg, max) = (45.086, 69.088, 94.947), stdev = 14.465
+  Confidence interval (99.9%): [59.424, 78.752]
+
+Result "queryingSnapshots": 64.948 ±(99.9%) 9.072 ops/ms [Average]
+  Statistics: (min, avg, max) = (42.778, 64.948, 85.983), stdev = 13.579
+  Confidence interval (99.9%): [55.876, 74.021]
+
+Result "storingMessages": 1442.422 ±(99.9%) 192.621 ops/ms [Average]
+  Statistics: (min, avg, max) = (1053.195, 1442.422, 1922.316), stdev = 288.306
+  Confidence interval (99.9%): [1249.801, 1635.042]
+
+
+# Run complete. Total time: 00:09:13
+
+Benchmark                                                                               Mode  Samples     Score  Score error   Units
+o.e.y.c.b.NaiveMessageStorageBenchmark.naiveStorageGroup                               thrpt       30  1576.458      209.533  ops/ms
+o.e.y.c.b.NaiveMessageStorageBenchmark.naiveStorageGroup:checkingMessagesWithErrors    thrpt       30    69.088        9.664  ops/ms
+o.e.y.c.b.NaiveMessageStorageBenchmark.naiveStorageGroup:queryingSnapshots             thrpt       30    64.948        9.072  ops/ms
+o.e.y.c.b.NaiveMessageStorageBenchmark.naiveStorageGroup:storingMessages               thrpt       30  1442.422      192.621  ops/ms
