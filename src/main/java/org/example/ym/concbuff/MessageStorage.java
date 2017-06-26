@@ -14,7 +14,7 @@ public interface MessageStorage {
     int countLatestMatching(int quantity, Predicate<Message> predicate);
 
     static MessageStorage newStorage(int messagesKeepTime, TimeUnit unit) {
-        return NaiveMessageStorage.newNaiveMessageStorage(messagesKeepTime, unit);
+        return ConcurrentMessageStorage.newConcurrentMessageStorage(messagesKeepTime, unit);
     }
 
 }

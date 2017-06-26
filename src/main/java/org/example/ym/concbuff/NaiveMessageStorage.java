@@ -8,10 +8,8 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static java.util.Arrays.asList;
 import static java.util.Collections.binarySearch;
 import static java.util.Comparator.comparing;
-import static java.util.Comparator.comparingLong;
 import static java.util.stream.Collectors.toList;
 
 public class NaiveMessageStorage implements MessageStorage {
@@ -151,62 +149,4 @@ public class NaiveMessageStorage implements MessageStorage {
         return new ArrayList<>(messages.subList(startIdx, messages.size()));
     }
 
-    private static class MessageWithTimestamp {
-
-        private static final Comparator<MessageWithTimestamp> hundredMillisGranularityComparator = comparing(
-                MessageWithTimestamp::getTimestamp,
-                comparingLong(Instant::getEpochSecond)
-                        .thenComparingLong(i -> {
-                            long millis = i.toEpochMilli();
-                            return (millis / 100) * 100; // comparison granularity is 100 millis
-                        })
-        );
-
-        private static final Comparator<MessageWithTimestamp> oneSecondGranularityComparator = comparing(
-                MessageWithTimestamp::getTimestamp,
-                comparingLong(Instant::getEpochSecond)
-        );
-
-
-        private static final Comparator<MessageWithTimestamp> oneMinuteGranularityComparator = comparing(
-                MessageWithTimestamp::getTimestamp,
-                comparingLong(i -> i.getEpochSecond() / 60)
-        );
-
-
-        private static final Comparator<MessageWithTimestamp> oneHourGranularityComparator = comparing(
-                MessageWithTimestamp::getTimestamp,
-                comparingLong(i -> i.getEpochSecond() / (60 * 60))
-        );
-
-
-        private final Message message;
-        private final Instant timestamp;
-
-        private MessageWithTimestamp(Message message, Instant timestamp) {
-            this.message = message;
-            this.timestamp = timestamp;
-        }
-
-        private static MessageWithTimestamp binarySearchTimestamp(Instant timestamp) {
-            return new MessageWithTimestamp(null, timestamp);
-        }
-
-        public Message getMessage() {
-            return message;
-        }
-
-        public Instant getTimestamp() {
-            return timestamp;
-        }
-
-        public static List<Comparator<MessageWithTimestamp>> comparatorsOrderedByGranularity() {
-            return asList(
-                    hundredMillisGranularityComparator,
-                    oneSecondGranularityComparator,
-                    oneMinuteGranularityComparator,
-                    oneHourGranularityComparator
-            );
-        }
-    }
 }
