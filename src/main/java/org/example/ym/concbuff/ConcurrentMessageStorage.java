@@ -7,6 +7,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
@@ -38,13 +40,13 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     @Override
     public void storeMessage(Message message) {
-        Instant now = Instant.now();
-
-        //todo maybe merge this methods together
-        Instant nowNormalized = normalizeToBucketGranularityFlor(now);
+        final Instant now = Instant.now();
+        final Instant nowNormalized = normalizeToBucketGranularityFlor(now);
 
         final Bucket targetBucket = timedBuckets.computeIfAbsent(nowNormalized, tst -> new Bucket());
-        synchronized (targetBucket) {
+
+        try{
+            targetBucket.lock.writeLock().lock();
 
             if (!targetBucket.isMarked()) {
                 sortedAvailableInstants.addLast(nowNormalized);
@@ -53,6 +55,8 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
             targetBucket.addMessage(new MessageWithTimestamp(message, now));
 
+        }finally {
+            targetBucket.lock.writeLock().unlock();
         }
 
         cleanUpForNow(now);
@@ -88,11 +92,17 @@ public class ConcurrentMessageStorage implements MessageStorage {
             final Bucket currentBucket = timedBuckets.get(timestampsIter.next());
             if (currentBucket != null) {
                 // todo: should synchronize and copy only in 'Danger zone' (1-2 buckets close to current inserting point), other are not filled any more
-                synchronized (currentBucket) {
+
+                try{
+                    currentBucket.lock.readLock().lock();
+
                     if (!currentBucket.isEmpty()) {
-                         gatheredChunksWithinKeepAlive.addFirst(new ArrayList<>(currentBucket.getMessages()));
-                         chunksAccumulatedSize += currentBucket.messageCount();
-                     }
+                        gatheredChunksWithinKeepAlive.addFirst(new ArrayList<>(currentBucket.getMessages()));
+                        chunksAccumulatedSize += currentBucket.messageCount();
+                    }
+
+                }finally {
+                    currentBucket.lock.readLock().unlock();
                 }
             }
 
@@ -225,6 +235,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
 
     private static class Bucket {
+        private final ReadWriteLock lock = new ReentrantReadWriteLock();
         private boolean isMarked = false;
         private ArrayList<MessageWithTimestamp> messages = new ArrayList<>(INITIAL_BUCKET_ARR_SIZE);
 
