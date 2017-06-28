@@ -4,20 +4,24 @@ package org.example.ym.concbuff;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+
 import static java.util.Arrays.asList;
 import static java.util.Comparator.comparing;
 import static java.util.Comparator.comparingLong;
 
-class MessageWithTimestamp
-{
+class MessageWithTimestamp {
+
+    private static final Comparator<MessageWithTimestamp> oneMilliGranularityComparator = comparing(
+            MessageWithTimestamp::getTimestamp,
+            comparingLong(Instant::toEpochMilli)
+    );
 
     private static final Comparator<MessageWithTimestamp> hundredMillisGranularityComparator = comparing(
             MessageWithTimestamp::getTimestamp,
-            comparingLong(Instant::getEpochSecond)
-                    .thenComparingLong(i -> {
-                        long millis = i.toEpochMilli();
-                        return (millis / 100) * 100; // comparison granularity is 100 millis
-                    })
+            comparingLong(i -> {
+                long millis = i.toEpochMilli();
+                return (millis / 100) * 100; // comparison granularity is 100 millis
+            })
     );
 
     private static final Comparator<MessageWithTimestamp> oneSecondGranularityComparator = comparing(
@@ -60,6 +64,7 @@ class MessageWithTimestamp
 
     public static List<Comparator<MessageWithTimestamp>> comparatorsOrderedByGranularity() {
         return asList(
+                oneMilliGranularityComparator,
                 hundredMillisGranularityComparator,
                 oneSecondGranularityComparator,
                 oneMinuteGranularityComparator,

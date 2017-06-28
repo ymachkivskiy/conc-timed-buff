@@ -1,0 +1,24 @@
+Result: 136.127 ±(99.9%) 3.006 ops/ms [Average]
+  Statistics: (min, avg, max) = (121.470, 136.127, 142.085), stdev = 4.500
+  Confidence interval (99.9%): [133.121, 139.133]
+
+Result "checkingMessagesWithErrors": 34.447 ±(99.9%) 1.111 ops/ms [Average]
+  Statistics: (min, avg, max) = (29.749, 34.447, 36.770), stdev = 1.663
+  Confidence interval (99.9%): [33.336, 35.559]
+
+Result "queryingSnapshots": 34.560 ±(99.9%) 1.110 ops/ms [Average]
+  Statistics: (min, avg, max) = (29.876, 34.560, 36.855), stdev = 1.661
+  Confidence interval (99.9%): [33.450, 35.670]
+
+Result "storingMessages": 67.120 ±(99.9%) 1.787 ops/ms [Average]
+  Statistics: (min, avg, max) = (60.449, 67.120, 73.231), stdev = 2.674
+  Confidence interval (99.9%): [65.333, 68.907]
+
+
+# Run complete. Total time: 00:08:40
+
+Benchmark                                                                                         Mode  Samples    Score  Score error   Units
+o.e.y.c.b.ConcurrentMessageStorageBenchmark.concurrentStorageGroup                               thrpt       30  136.127        3.006  ops/ms
+o.e.y.c.b.ConcurrentMessageStorageBenchmark.concurrentStorageGroup:checkingMessagesWithErrors    thrpt       30   34.447        1.111  ops/ms
+o.e.y.c.b.ConcurrentMessageStorageBenchmark.concurrentStorageGroup:queryingSnapshots             thrpt       30   34.560        1.110  ops/ms
+o.e.y.c.b.ConcurrentMessageStorageBenchmark.concurrentStorageGroup:storingMessages               thrpt       30   67.120        1.787  ops/ms

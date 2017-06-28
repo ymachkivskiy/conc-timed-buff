@@ -27,7 +27,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
     private static final int INITIAL_BUCKET_ARR_SIZE = 5_000;
     private static final int CLEAN_UP_FREQUENCY = 50;
 
-    private static final int BINARY_SEARCH_MIN_THRESHOLD = 50;
+    private static final int BINARY_SEARCH_MIN_THRESHOLD = 16;
 
     private final ConcurrentHashMap<Instant, Bucket> storageBuckets = new ConcurrentHashMap<>();
     private final ConcurrentLinkedDeque<Instant> bucketIdentifiersForCleanUp = new ConcurrentLinkedDeque<>();
