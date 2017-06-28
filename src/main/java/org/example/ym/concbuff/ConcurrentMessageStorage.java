@@ -14,17 +14,23 @@ import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Collections.binarySearch;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.unmodifiableList;
+import static java.util.Optional.ofNullable;
 import static java.util.stream.Collectors.toList;
+import static org.example.ym.concbuff.MessageWithTimestamp.binarySearchTimestamp;
+import static org.example.ym.concbuff.MessageWithTimestamp.comparatorsOrderedByGranularity;
 
 public class ConcurrentMessageStorage implements MessageStorage {
-    private static final int BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS = 5;
 
+    private static final int BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS = 5;
     private static final int INITIAL_BUCKET_ARR_SIZE = 5_000;
     private static final int BINARY_SEARCH_MIN_THRESHOLD = 50;
 
+    private final ConcurrentHashMap<Instant, Bucket> storageBuckets = new ConcurrentHashMap<>();
+    private final ConcurrentLinkedDeque<Instant> bucketIdentifiersForCleanUp = new ConcurrentLinkedDeque<>();
+
     private final Duration keepAliveDuration;
-    private final ConcurrentHashMap<Instant, Bucket> timedBuckets = new ConcurrentHashMap<>();
-    private final ConcurrentLinkedDeque<Instant> sortedAvailableInstants = new ConcurrentLinkedDeque<>();
 
 
     private ConcurrentMessageStorage(int messagesKeepTime, TimeUnit unit) {
@@ -40,26 +46,13 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     @Override
     public void storeMessage(Message message) {
+
         final Instant now = Instant.now();
-        final Instant nowNormalized = normalizeToBucketGranularityFlor(now);
 
-        final Bucket targetBucket = timedBuckets.computeIfAbsent(nowNormalized, tst -> new Bucket());
+        Bucket targetBucket = getStorageBucketForCurrentInstant(now);
+        storeMessageInBucket(targetBucket, new MessageWithTimestamp(message, now));
 
-        try{
-            targetBucket.lock.writeLock().lock();
-
-            if (!targetBucket.isMarked()) {
-                sortedAvailableInstants.addLast(nowNormalized);
-                targetBucket.mark();
-            }
-
-            targetBucket.addMessage(new MessageWithTimestamp(message, now));
-
-        }finally {
-            targetBucket.lock.writeLock().unlock();
-        }
-
-        cleanUpForNow(now);
+        tryCleanUp(now);
 
     }
 
@@ -75,102 +68,120 @@ public class ConcurrentMessageStorage implements MessageStorage {
                 .count();
     }
 
+    private Bucket getStorageBucketForCurrentInstant(Instant now) {
+        return storageBuckets.computeIfAbsent(normalizeToBucketGranularity(now), Bucket::new);
+    }
+
+    private void storeMessageInBucket(Bucket targetBucket, MessageWithTimestamp messageWithTimestamp) {
+        try{
+            targetBucket.lock.writeLock().lock();
+
+            targetBucket.addMessage(messageWithTimestamp);
+
+            rememberBucketIdentifierForCleanUpPurposes(targetBucket);
+
+        }finally {
+            targetBucket.lock.writeLock().unlock();
+        }
+    }
+
+    private void rememberBucketIdentifierForCleanUpPurposes(Bucket targetBucket) {
+        if (!targetBucket.isRememberedForCleanUp()) {
+            bucketIdentifiersForCleanUp.addLast(targetBucket.identifier);
+            targetBucket.markAsRemembered();
+        }
+    }
+
     private Stream<Message> internalQueryLatestStream(int quantity) {
+
         final Instant now = Instant.now();
 
         if (quantity <= 0) {
             return Stream.empty();
         }
 
-        // --------------
-        BucketNormalizedTimestampsIterator timestampsIter = new BucketNormalizedTimestampsIterator(now);
+        LinkedList<List<MessageWithTimestamp>> chunksWithinKeepAlive = gatherOrderedChunksWithinKeepAliveForQuantity(now, quantity);
 
-        LinkedList<List<MessageWithTimestamp>> gatheredChunksWithinKeepAlive = new LinkedList<>();
-        int chunksAccumulatedSize = 0;
-        while (chunksAccumulatedSize < quantity && timestampsIter.hasNext()){
-
-            final Bucket currentBucket = timedBuckets.get(timestampsIter.next());
-            if (currentBucket != null) {
-                // todo: should synchronize and copy only in 'Danger zone' (1-2 buckets close to current inserting point), other are not filled any more
-
-                try{
-                    currentBucket.lock.readLock().lock();
-
-                    if (!currentBucket.isEmpty()) {
-                        gatheredChunksWithinKeepAlive.addFirst(new ArrayList<>(currentBucket.getMessages()));
-                        chunksAccumulatedSize += currentBucket.messageCount();
-                    }
-
-                }finally {
-                    currentBucket.lock.readLock().unlock();
-                }
-            }
-
-        }
-
-        if (chunksAccumulatedSize == 0 || gatheredChunksWithinKeepAlive.isEmpty()) {
+        if (chunksWithinKeepAlive.isEmpty()) {
             return Stream.empty();
         }
 
-        filterOutChunksExceedingKeepAlive(now, gatheredChunksWithinKeepAlive);
+        dropExceededKeepAliveInOldestChunk(chunksWithinKeepAlive, now);
 
-        LinkedList<List<MessageWithTimestamp>> chucksWithDesiredQuantity = getDesiredQuantityInChunks(gatheredChunksWithinKeepAlive, quantity);
+        tryCleanUp(now);
 
-        cleanUpForNow(now);
-
-        return chucksWithDesiredQuantity.stream()
-                .flatMap(List::stream)
-                .map(MessageWithTimestamp::getMessage);
+        return convertToMessagesStream(getChunksWithDesiredQuantity(chunksWithinKeepAlive, quantity));
     }
 
-    private LinkedList<List<MessageWithTimestamp>> getDesiredQuantityInChunks(LinkedList<List<MessageWithTimestamp>> gatheredChunksWithinKeepAlive, int desiredQuantity) {
-        LinkedList<List<MessageWithTimestamp>> result = new LinkedList<>();
-        int quantityToGatherLeft = desiredQuantity;
-        while (quantityToGatherLeft > 0 && !gatheredChunksWithinKeepAlive.isEmpty()) {
-            List<MessageWithTimestamp> latestChunk = gatheredChunksWithinKeepAlive.pollLast();
+    private LinkedList<List<MessageWithTimestamp>> gatherOrderedChunksWithinKeepAliveForQuantity(Instant now, int quantity) {
 
-            if (latestChunk.size() < quantityToGatherLeft) {
-                result.addFirst(latestChunk);
-                quantityToGatherLeft -= latestChunk.size();
+        LinkedList<List<MessageWithTimestamp>> orderedChunks = new LinkedList<>();
+        int chunksAccumulatedSize = 0;
+
+        for (WithinKeepAliveBucketsIterator it = new WithinKeepAliveBucketsIterator(now);
+             chunksAccumulatedSize < quantity && it.hasNext();){
+
+            List<MessageWithTimestamp> messages = it.next().readMessages();
+
+            if (!messages.isEmpty()) {
+                orderedChunks.addFirst(messages);
+                chunksAccumulatedSize += messages.size();
+            }
+
+        }
+
+        return orderedChunks;
+    }
+
+    private void dropExceededKeepAliveInOldestChunk(LinkedList<List<MessageWithTimestamp>> chunksWithinKeepAlive, Instant now) {
+        List<MessageWithTimestamp> oldestChunk = chunksWithinKeepAlive.pollFirst();
+        List<MessageWithTimestamp> oldestChunkWithOnlyKeepAliveMessages = dropMessagesExceedingKeepAlive(oldestChunk, lastAcceptableTimestampFor(now));
+        chunksWithinKeepAlive.addFirst(oldestChunkWithOnlyKeepAliveMessages);
+    }
+
+    private static LinkedList<List<MessageWithTimestamp>> getChunksWithDesiredQuantity(LinkedList<List<MessageWithTimestamp>> chunks, int desiredQuantity) {
+        LinkedList<List<MessageWithTimestamp>> result = new LinkedList<>();
+
+        while (desiredQuantity > 0 && !chunks.isEmpty()) {
+            List<MessageWithTimestamp> currentChunk = chunks.pollLast();
+
+            if (currentChunk.size() < desiredQuantity) {
+                result.addFirst(currentChunk);
+                desiredQuantity -= currentChunk.size();
             } else {
-                result.addFirst(latestChunk.subList(latestChunk.size() - quantityToGatherLeft, latestChunk.size()));
-                quantityToGatherLeft = 0;
+                result.addFirst(currentChunk.subList(currentChunk.size() - desiredQuantity, currentChunk.size()));
+                desiredQuantity = 0;
             }
         }
+
         return result;
     }
 
-
-    private void cleanUpForNow(Instant now) {
-        Instant latestBucketNormalizedTimestamp = sortedAvailableInstants.pollFirst();
-        if (latestBucketNormalizedTimestamp != null) {
-            if (latestBucketNormalizedTimestamp.isBefore(lastAcceptableBucketNormalizedTimestampForNow(now))) {
-                timedBuckets.remove(latestBucketNormalizedTimestamp);
-            }
-            else {
-                sortedAvailableInstants.addFirst(latestBucketNormalizedTimestamp);
-            }
-        }
-    }
-
-    private void filterOutChunksExceedingKeepAlive(Instant now, LinkedList<List<MessageWithTimestamp>> gatheredChunksWithinKeepAlive) {
-        List<MessageWithTimestamp> lastChunk = gatheredChunksWithinKeepAlive.pollFirst();
-        int firstAcceptableMessageIndexInLastChunk = findFirstAcceptableMessageIndex(lastAcceptableTimestampForNow(now), lastChunk);
-        if (firstAcceptableMessageIndexInLastChunk >= 0 && firstAcceptableMessageIndexInLastChunk < lastChunk.size()) {
-            gatheredChunksWithinKeepAlive.addFirst(lastChunk.subList(firstAcceptableMessageIndexInLastChunk, lastChunk.size()));
-        }
-    }
-
-
-    private Instant lastAcceptableTimestampForNow(Instant now) {
+    private Instant lastAcceptableTimestampFor(Instant now) {
         return now.minus(keepAliveDuration);
     }
 
-    private Instant lastAcceptableBucketNormalizedTimestampForNow(Instant now) {
-        return normalizeToBucketGranularityFlor(now.minus(keepAliveDuration));
+
+    private Instant oldestAcceptableBucketIdentifierFor(Instant now) {
+        return normalizeToBucketGranularity(now.minus(keepAliveDuration));
     }
 
-    private static Instant normalizeToBucketGranularityFlor(Instant instant) {
+    private void tryCleanUp(Instant now) {
+
+        Instant oldestBucketIdentifier = bucketIdentifiersForCleanUp.pollFirst();
+        if (oldestBucketIdentifier != null) {
+            if (oldestBucketIdentifier.isBefore(oldestAcceptableBucketIdentifierFor(now))) {
+                storageBuckets.remove(oldestBucketIdentifier);
+            }
+            else {
+                bucketIdentifiersForCleanUp.addFirst(oldestBucketIdentifier);
+            }
+        }
+    }
+
+    //region Util functions
+
+    private static Instant normalizeToBucketGranularity(Instant instant) {
 
         long millis = instant.toEpochMilli();
         int bucketGranularity = BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100;
@@ -179,89 +190,104 @@ public class ConcurrentMessageStorage implements MessageStorage {
         return Instant.ofEpochMilli(normalizedMillis);
     }
 
-    private int findFirstAcceptableMessageIndex(Instant lastAcceptable, List<MessageWithTimestamp> messages) {
-        int idx = Math.max(0, tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(lastAcceptable, messages));
-        return findFirstAcceptableMessageIdxStartingFrom(idx, lastAcceptable, messages);
+    private static List<MessageWithTimestamp> dropMessagesExceedingKeepAlive(List<MessageWithTimestamp> messages, Instant oldestAcceptableTimestamp) {
+
+        int idx = tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(messages, oldestAcceptableTimestamp);
+        idx = findFirstAcceptableMessageIdxSequentially(messages, idx, oldestAcceptableTimestamp);
+
+        if (idx >= 0 && idx < messages.size()) {
+            return messages.subList(idx, messages.size());
+        }
+
+        return emptyList();
     }
 
-    private int tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(Instant lastAcceptable, List<MessageWithTimestamp> messages) {
+    private  static int tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(List<MessageWithTimestamp> messages, Instant lastAcceptable) {
         if (messages.size() < BINARY_SEARCH_MIN_THRESHOLD) {
-            return -1;
+            return 0;
         }
 
-        MessageWithTimestamp searchTarget = MessageWithTimestamp.binarySearchTimestamp(lastAcceptable);
-        List<Comparator<MessageWithTimestamp>> comparators = MessageWithTimestamp.comparatorsOrderedByGranularity();
+        int estimatedIdx = comparatorsOrderedByGranularity().stream()
+                .mapToInt(comparator -> binarySearch(messages, binarySearchTimestamp(lastAcceptable), comparator))
+                .filter(idx -> idx >= 0)
+                .findFirst()
+                .orElse(0);
 
-        int idx = -1;
-        for (Iterator<Comparator<MessageWithTimestamp>> itComparator = comparators.iterator(); idx < 0 && itComparator.hasNext(); ) {
-            idx = binarySearch(messages, searchTarget, itComparator.next());
+        // correct binary search errors
+        while (estimatedIdx > 0 && messages.get(estimatedIdx).timestamp.isAfter(lastAcceptable)) {
+            estimatedIdx--;
         }
 
-        return idx;
+        return estimatedIdx;
     }
 
-    private int findFirstAcceptableMessageIdxStartingFrom(int idx, Instant lastAcceptable, List<MessageWithTimestamp> messages) {
-        while (idx > 0 && messages.get(idx).timestamp.isAfter(lastAcceptable)) {
-            idx--;
+    private static int findFirstAcceptableMessageIdxSequentially(List<MessageWithTimestamp> messages, int startingIdx, Instant lastAcceptable) {
+
+        while (startingIdx < messages.size() && messages.get(startingIdx).timestamp.isBefore(lastAcceptable)) {
+            startingIdx++;
         }
 
-        while (idx < messages.size() && messages.get(idx).timestamp.isBefore(lastAcceptable)) {
-            idx++;
-        }
-        return idx;
+        return startingIdx;
     }
 
-    private class BucketNormalizedTimestampsIterator implements Iterator<Instant> {
+    private static Stream<Message> convertToMessagesStream(LinkedList<List<MessageWithTimestamp>> chunks) {
+        return chunks.stream()
+                .flatMap(List::stream)
+                .map(MessageWithTimestamp::getMessage);
+    }
 
-        private Instant currentBucketTimeStamp;
-        private final Instant lastAcceptableBucketTimestamp;
+    //endregion
 
-        public BucketNormalizedTimestampsIterator(Instant now) {
-            this.lastAcceptableBucketTimestamp = lastAcceptableBucketNormalizedTimestampForNow(now);
-            this.currentBucketTimeStamp = normalizeToBucketGranularityFlor(now).plusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
+    private class WithinKeepAliveBucketsIterator implements Iterator<BucketForReader> {
+
+        private final Instant oldestAcceptableBucketIdentifier;
+        private Instant currentBucketIdentifier;
+
+        public WithinKeepAliveBucketsIterator(Instant now) {
+            this.oldestAcceptableBucketIdentifier = oldestAcceptableBucketIdentifierFor(now);
+            this.currentBucketIdentifier = normalizeToBucketGranularity(now).plusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
         }
 
         @Override
         public boolean hasNext() {
-            return currentBucketTimeStamp.isAfter(lastAcceptableBucketTimestamp);
+            return currentBucketIdentifier.isAfter(oldestAcceptableBucketIdentifier);
         }
 
         @Override
-        public Instant next() {
-            currentBucketTimeStamp = currentBucketTimeStamp.minusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
-            return currentBucketTimeStamp;
+        public BucketForReader next() {
+            currentBucketIdentifier = currentBucketIdentifier.minusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
+            Bucket bucket = storageBuckets.get(currentBucketIdentifier);
+            return new BucketForReader(bucket);
         }
+
     }
 
-
     private static class Bucket {
-        private final ReadWriteLock lock = new ReentrantReadWriteLock();
-        private boolean isMarked = false;
+        public final ReadWriteLock lock = new ReentrantReadWriteLock();
+
+        private final Instant identifier;
+        private boolean isRememberedForCleanUp = false;
+
         private ArrayList<MessageWithTimestamp> messages = new ArrayList<>(INITIAL_BUCKET_ARR_SIZE);
 
-        public ArrayList<MessageWithTimestamp> getMessages() {
-            return messages;
+        public Bucket(Instant identifier) {
+            this.identifier = identifier;
         }
 
-        public boolean isEmpty() {
-            return messages.isEmpty();
-        }
-
-        public int messageCount() {
-            return messages.size();
+        public List<MessageWithTimestamp> getMessages() {
+            return unmodifiableList(messages);
         }
 
         public void addMessage(MessageWithTimestamp messageWithTimestamp) {
-            isMarked = true;
             messages.add(messageWithTimestamp);
         }
 
-        public boolean isMarked() {
-            return isMarked;
+        public boolean isRememberedForCleanUp() {
+            return isRememberedForCleanUp;
         }
 
-        public void mark() {
-            isMarked = true;
+        public void markAsRemembered() {
+            isRememberedForCleanUp = true;
         }
 
         @Override
@@ -270,6 +296,39 @@ public class ConcurrentMessageStorage implements MessageStorage {
                     "" + messages +
                     '}';
         }
+    }
+
+    private static class BucketForReader {
+        private final Optional<Bucket> bucket;
+
+        private BucketForReader(Bucket bucket) {
+            this.bucket = ofNullable(bucket);
+        }
+
+        public List<MessageWithTimestamp> readMessages() {
+            return bucket
+                    .map(this::readFromBucket)
+                    .orElseGet(Collections::emptyList);
+        }
+
+        private List<MessageWithTimestamp> readFromBucket(Bucket b) {
+            // todo: should synchronize and copy only in 'Danger zone' (1-2 buckets close to current inserting point), other are not filled any more
+
+            try{
+                b.lock.readLock().lock();
+
+                if (!b.getMessages().isEmpty()) {
+                    return new ArrayList<>(b.getMessages());
+                }
+
+                return emptyList();
+
+            }finally {
+                b.lock.readLock().unlock();
+            }
+
+        }
+
     }
 
 }
