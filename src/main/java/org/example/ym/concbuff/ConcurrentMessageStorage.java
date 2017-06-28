@@ -13,21 +13,24 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.time.Duration.ofMillis;
 import static java.util.Collections.binarySearch;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Optional.ofNullable;
 import static java.util.stream.Collectors.toList;
 import static org.example.ym.concbuff.MessageWithTimestamp.binarySearchTimestamp;
-import static org.example.ym.concbuff.MessageWithTimestamp.comparatorsOrderedByGranularity;
+import static org.example.ym.concbuff.MessageWithTimestampComparator.comparatorsForGranularity;
 
 public class ConcurrentMessageStorage implements MessageStorage {
 
-    private static final int BUCKET_TIME_GRANULARITY_IN_MILLIS = 25;
-    private static final int INITIAL_BUCKET_ARR_SIZE = 500;
+    private static final int BUCKET_TIME_GRANULARITY_IN_MILLIS = 5;
+    private static final int INITIAL_BUCKET_ARR_SIZE = 250;
     private static final int CLEAN_UP_FREQUENCY = 50;
 
     private static final int BINARY_SEARCH_MIN_THRESHOLD = 16;
+
+    private static final List<Comparator<MessageWithTimestamp>> BINARY_SEARCH_COMPARATORS = comparatorsForGranularity(ofMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS));
 
     private final ConcurrentHashMap<Instant, Bucket> storageBuckets = new ConcurrentHashMap<>();
     private final ConcurrentLinkedDeque<Instant> bucketIdentifiersForCleanUp = new ConcurrentLinkedDeque<>();
@@ -212,7 +215,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
             return 0;
         }
 
-        int estimatedIdx = comparatorsOrderedByGranularity().stream()
+        int estimatedIdx = BINARY_SEARCH_COMPARATORS.stream()
                 .mapToInt(comparator -> binarySearch(messages, binarySearchTimestamp(lastAcceptable), comparator))
                 .filter(idx -> idx >= 0)
                 .findFirst()

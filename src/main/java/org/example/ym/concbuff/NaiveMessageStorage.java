@@ -127,7 +127,7 @@ public class NaiveMessageStorage implements MessageStorage {
 
     private int tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(Instant lastAcceptable) {
         MessageWithTimestamp searchTarget = MessageWithTimestamp.binarySearchTimestamp(lastAcceptable);
-        List<Comparator<MessageWithTimestamp>> comparators = MessageWithTimestamp.comparatorsOrderedByGranularity();
+        List<Comparator<MessageWithTimestamp>> comparators = MessageWithTimestampComparator.comparators();
 
         int idx = -1;
         for (Iterator<Comparator<MessageWithTimestamp>> itComparator = comparators.iterator(); idx < 0 && itComparator.hasNext(); ) {
