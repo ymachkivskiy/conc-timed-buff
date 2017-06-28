@@ -268,7 +268,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
     }
 
     private static class Bucket {
-        public final ReadWriteLock lock = new ReentrantReadWriteLock();
+        public final ReadWriteLock lock = new ReentrantReadWriteLock(true);
 
         private final Instant identifier;
         private boolean isRememberedForCleanUp = false;
