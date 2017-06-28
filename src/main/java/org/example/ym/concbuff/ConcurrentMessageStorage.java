@@ -25,12 +25,16 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     private static final int BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS = 5;
     private static final int INITIAL_BUCKET_ARR_SIZE = 5_000;
+    private static final int CLEAN_UP_FREQUENCY = 50;
+
     private static final int BINARY_SEARCH_MIN_THRESHOLD = 50;
 
     private final ConcurrentHashMap<Instant, Bucket> storageBuckets = new ConcurrentHashMap<>();
     private final ConcurrentLinkedDeque<Instant> bucketIdentifiersForCleanUp = new ConcurrentLinkedDeque<>();
 
     private final Duration keepAliveDuration;
+
+    private volatile int estimatedWritesCount;
 
 
     private ConcurrentMessageStorage(int messagesKeepTime, TimeUnit unit) {
@@ -92,6 +96,22 @@ public class ConcurrentMessageStorage implements MessageStorage {
         }
     }
 
+    private void tryCleanUp(Instant now) {
+        // increment does not need to be atomic for estimation
+        if (Math.floorMod(++estimatedWritesCount, CLEAN_UP_FREQUENCY) == 0)
+        {
+            Instant oldestBucketIdentifier = bucketIdentifiersForCleanUp.pollFirst();
+            if (oldestBucketIdentifier != null) {
+                if (oldestBucketIdentifier.isBefore(oldestAcceptableBucketIdentifierFor(now))) {
+                    storageBuckets.remove(oldestBucketIdentifier);
+                }
+                else {
+                    bucketIdentifiersForCleanUp.addFirst(oldestBucketIdentifier);
+                }
+            }
+        }
+    }
+
     private Stream<Message> internalQueryLatestStream(int quantity) {
 
         final Instant now = Instant.now();
@@ -107,8 +127,6 @@ public class ConcurrentMessageStorage implements MessageStorage {
         }
 
         dropExceededKeepAliveInOldestChunk(chunksWithinKeepAlive, now);
-
-        tryCleanUp(now);
 
         return convertToMessagesStream(getChunksWithDesiredQuantity(chunksWithinKeepAlive, quantity));
     }
@@ -157,26 +175,13 @@ public class ConcurrentMessageStorage implements MessageStorage {
         return result;
     }
 
+
     private Instant lastAcceptableTimestampFor(Instant now) {
         return now.minus(keepAliveDuration);
     }
 
-
     private Instant oldestAcceptableBucketIdentifierFor(Instant now) {
         return normalizeToBucketGranularity(now.minus(keepAliveDuration));
-    }
-
-    private void tryCleanUp(Instant now) {
-
-        Instant oldestBucketIdentifier = bucketIdentifiersForCleanUp.pollFirst();
-        if (oldestBucketIdentifier != null) {
-            if (oldestBucketIdentifier.isBefore(oldestAcceptableBucketIdentifierFor(now))) {
-                storageBuckets.remove(oldestBucketIdentifier);
-            }
-            else {
-                bucketIdentifiersForCleanUp.addFirst(oldestBucketIdentifier);
-            }
-        }
     }
 
     //region Util functions
