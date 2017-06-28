@@ -23,8 +23,8 @@ import static org.example.ym.concbuff.MessageWithTimestamp.comparatorsOrderedByG
 
 public class ConcurrentMessageStorage implements MessageStorage {
 
-    private static final int BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS = 5;
-    private static final int INITIAL_BUCKET_ARR_SIZE = 5_000;
+    private static final int BUCKET_TIME_GRANULARITY_IN_MILLIS = 25;
+    private static final int INITIAL_BUCKET_ARR_SIZE = 500;
     private static final int CLEAN_UP_FREQUENCY = 50;
 
     private static final int BINARY_SEARCH_MIN_THRESHOLD = 16;
@@ -189,7 +189,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
     private static Instant normalizeToBucketGranularity(Instant instant) {
 
         long millis = instant.toEpochMilli();
-        int bucketGranularity = BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100;
+        int bucketGranularity = BUCKET_TIME_GRANULARITY_IN_MILLIS;
         long normalizedMillis = (millis / bucketGranularity) * bucketGranularity;
 
         return Instant.ofEpochMilli(normalizedMillis);
@@ -250,7 +250,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
         public WithinKeepAliveBucketsIterator(Instant now) {
             this.oldestAcceptableBucketIdentifier = oldestAcceptableBucketIdentifierFor(now);
-            this.currentBucketIdentifier = normalizeToBucketGranularity(now).plusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
+            this.currentBucketIdentifier = normalizeToBucketGranularity(now).plusMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS);
         }
 
         @Override
@@ -260,7 +260,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
         @Override
         public BucketForReader next() {
-            currentBucketIdentifier = currentBucketIdentifier.minusMillis(BUCKET_TIME_GRANULARITY_IN_HUNDREDS_MILLIS * 100);
+            currentBucketIdentifier = currentBucketIdentifier.minusMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS);
             Bucket bucket = storageBuckets.get(currentBucketIdentifier);
             return new BucketForReader(bucket);
         }
