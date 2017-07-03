@@ -12,6 +12,11 @@ import static java.util.stream.Collectors.toList;
 
 public enum MessageWithTimestampComparator implements Comparator<MessageWithTimestamp> {
 
+    TEN_MICROSECONDS_GRANULARITY(
+            ofNanos(10 * 1_000),
+            Comparator.comparing(MessageWithTimestamp::getTimestamp,
+                    Comparator.comparingLong(i -> i.getEpochSecond() * 1_000 * 1_000 + (i.getNano() / (1_000 * 10)) * 10))
+    ),
 
     ONE_HUNDRED_MICROSECONDS_GRANULARITY(
             ofNanos(100 * 1_000),

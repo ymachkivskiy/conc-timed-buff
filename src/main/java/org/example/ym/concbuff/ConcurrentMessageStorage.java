@@ -7,8 +7,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
@@ -24,11 +23,11 @@ import static org.example.ym.concbuff.MessageWithTimestampComparator.comparators
 
 public class ConcurrentMessageStorage implements MessageStorage {
 
-    private static final int BUCKET_TIME_GRANULARITY_IN_MILLIS = 5;
-    private static final int INITIAL_BUCKET_ARR_SIZE = 250;
-    private static final int CLEAN_UP_FREQUENCY = 50;
+    private static final int BUCKET_TIME_GRANULARITY_IN_MILLIS = 1;
+    private static final int INITIAL_BUCKET_ARR_SIZE = 25;
+    private static final int CLEAN_UP_FREQUENCY = 100;
 
-    private static final int BINARY_SEARCH_MIN_THRESHOLD = 16;
+    private static final int BINARY_SEARCH_MIN_THRESHOLD = 8;
 
     private static final List<Comparator<MessageWithTimestamp>> BINARY_SEARCH_COMPARATORS = comparatorsForGranularity(ofMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS));
 
@@ -80,15 +79,16 @@ public class ConcurrentMessageStorage implements MessageStorage {
     }
 
     private void storeMessageInBucket(Bucket targetBucket, MessageWithTimestamp messageWithTimestamp) {
+
+        long stamp = targetBucket.lock.writeLock();
         try{
-            targetBucket.lock.writeLock().lock();
 
             targetBucket.addMessage(messageWithTimestamp);
 
             rememberBucketIdentifierForCleanUpPurposes(targetBucket);
 
         }finally {
-            targetBucket.lock.writeLock().unlock();
+            targetBucket.lock.unlockWrite(stamp);
         }
     }
 
@@ -271,7 +271,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
     }
 
     private static class Bucket {
-        public final ReadWriteLock lock = new ReentrantReadWriteLock(true);
+        public final StampedLock lock = new StampedLock();
 
         private final Instant identifier;
         private boolean isRememberedForCleanUp = false;
@@ -320,21 +320,25 @@ public class ConcurrentMessageStorage implements MessageStorage {
         }
 
         private List<MessageWithTimestamp> readFromBucket(Bucket b) {
-            // todo: should synchronize and copy only in 'Danger zone' (1-2 buckets close to current inserting point), other are not filled any more
 
-            try{
-                b.lock.readLock().lock();
+            long stamp = b.lock.tryOptimisticRead();
 
-                if (!b.getMessages().isEmpty()) {
-                    return new ArrayList<>(b.getMessages());
+            List<MessageWithTimestamp> result = new ArrayList<>(b.getMessages());
+
+            if (!b.lock.validate(stamp)) {
+
+                try{
+                    stamp = b.lock.readLock();
+
+                    result = new ArrayList<>(b.getMessages());
+
+                }finally {
+                    b.lock.unlockRead(stamp);
                 }
 
-                return emptyList();
-
-            }finally {
-                b.lock.readLock().unlock();
             }
 
+            return result;
         }
 
     }
