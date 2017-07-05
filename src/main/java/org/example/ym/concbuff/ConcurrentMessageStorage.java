@@ -15,11 +15,10 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static java.time.Duration.ofMillis;
 import static java.util.Collections.binarySearch;
 import static java.util.Collections.emptyList;
-import static java.util.Collections.unmodifiableList;
 import static java.util.Optional.ofNullable;
-import static java.util.stream.Collectors.toList;
-import static org.example.ym.concbuff.MessageWithTimestamp.binarySearchTimestamp;
-import static org.example.ym.concbuff.MessageWithTimestampComparator.comparatorsForGranularity;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Stream.concat;
+import static org.example.ym.concbuff.TimestampComparator.comparatorsForGranularity;
 
 public class ConcurrentMessageStorage implements MessageStorage {
 
@@ -29,7 +28,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     private static final int BINARY_SEARCH_MIN_THRESHOLD = 8;
 
-    private static final List<Comparator<MessageWithTimestamp>> BINARY_SEARCH_COMPARATORS = comparatorsForGranularity(ofMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS));
+    private static final List<Comparator<Instant>> BINARY_SEARCH_COMPARATORS = comparatorsForGranularity(ofMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS));
 
     private final ConcurrentHashMap<Instant, Bucket> storageBuckets = new ConcurrentHashMap<>();
     private final ConcurrentLinkedDeque<Instant> bucketIdentifiersForCleanUp = new ConcurrentLinkedDeque<>();
@@ -56,7 +55,7 @@ public class ConcurrentMessageStorage implements MessageStorage {
         final Instant now = Instant.now();
 
         Bucket targetBucket = getStorageBucketForCurrentInstant(now);
-        storeMessageInBucket(targetBucket, new MessageWithTimestamp(message, now));
+        storeMessageInBucket(targetBucket, message, now);
 
         tryCleanUp(now);
 
@@ -64,12 +63,21 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     @Override
     public List<Message> queryLatest(int quantity) {
-        return internalQueryLatestStream(quantity).collect(toList());
+        List<List<Message>> chunks = internalQueryLatestChunks(quantity);
+
+        List<Message> result = new ArrayList<>(summaryMessageQuantity(chunks));
+
+        for (List<Message> chunk : chunks) {
+            result.addAll(chunk);
+        }
+
+        return result;
     }
 
     @Override
     public int countLatestMatching(int quantity, Predicate<Message> predicate) {
-        return (int) internalQueryLatestStream(quantity)
+        return (int) internalQueryLatestChunks(quantity).stream()
+                .flatMap(List::stream)
                 .filter(predicate)
                 .count();
     }
@@ -78,71 +86,80 @@ public class ConcurrentMessageStorage implements MessageStorage {
         return storageBuckets.computeIfAbsent(normalizeToBucketGranularity(now), Bucket::new);
     }
 
-    private void storeMessageInBucket(Bucket targetBucket, MessageWithTimestamp messageWithTimestamp) {
+    private void storeMessageInBucket(Bucket targetBucket, Message message, Instant timestamp) {
 
-        long stamp = targetBucket.lock.writeLock();
-        try{
+        boolean shouldRememberForCleanUp = writeToBucketWithLock(targetBucket, message, timestamp);
 
-            targetBucket.addMessage(messageWithTimestamp);
-
-            rememberBucketIdentifierForCleanUpPurposes(targetBucket);
-
-        }finally {
-            targetBucket.lock.unlockWrite(stamp);
+        if (shouldRememberForCleanUp) {
+            bucketIdentifiersForCleanUp.addLast(targetBucket.identifier);
         }
+
     }
 
-    private void rememberBucketIdentifierForCleanUpPurposes(Bucket targetBucket) {
-        if (!targetBucket.isRememberedForCleanUp()) {
-            bucketIdentifiersForCleanUp.addLast(targetBucket.identifier);
-            targetBucket.markAsRemembered();
+    private boolean writeToBucketWithLock(Bucket targetBucket, Message message, Instant timestamp) {
+        long stamp = targetBucket.lock.writeLock();
+        try {
+
+            targetBucket.addMessage(message, timestamp);
+
+            if (!targetBucket.isRememberedForCleanUp()) {
+                targetBucket.markAsRemembered();
+                return true;
+            }
+
+            return false;
+
+        } finally {
+            targetBucket.lock.unlockWrite(stamp);
         }
     }
 
     private void tryCleanUp(Instant now) {
         // increment does not need to be atomic for estimation
-        if (Math.floorMod(++estimatedWritesCount, CLEAN_UP_FREQUENCY) == 0)
-        {
+        if (Math.floorMod(++estimatedWritesCount, CLEAN_UP_FREQUENCY) == 0) {
             Instant oldestBucketIdentifier = bucketIdentifiersForCleanUp.pollFirst();
             if (oldestBucketIdentifier != null) {
                 if (oldestBucketIdentifier.isBefore(oldestAcceptableBucketIdentifierFor(now))) {
                     storageBuckets.remove(oldestBucketIdentifier);
-                }
-                else {
+                } else {
                     bucketIdentifiersForCleanUp.addFirst(oldestBucketIdentifier);
                 }
             }
         }
     }
 
-    private Stream<Message> internalQueryLatestStream(int quantity) {
+    private List<List<Message>> internalQueryLatestChunks(int quantity) {
 
         final Instant now = Instant.now();
 
         if (quantity <= 0) {
-            return Stream.empty();
+            return emptyList();
         }
 
-        LinkedList<List<MessageWithTimestamp>> chunksWithinKeepAlive = gatherOrderedChunksWithinKeepAliveForQuantity(now, quantity);
+        LinkedList<MessagesWithTimestamps> chunksWithinKeepAlive = gatherOrderedChunksWithinKeepAliveForQuantity(now, quantity);
 
         if (chunksWithinKeepAlive.isEmpty()) {
-            return Stream.empty();
+            return emptyList();
         }
 
-        dropExceededKeepAliveInOldestChunk(chunksWithinKeepAlive, now);
+        LinkedList<List<Message>> messagesWithinKeepAlive = dropExceededKeepAliveInOldestChunk(chunksWithinKeepAlive, now);
 
-        return convertToMessagesStream(getChunksWithDesiredQuantity(chunksWithinKeepAlive, quantity));
+        if (summaryMessageQuantity(messagesWithinKeepAlive) <= quantity) {
+            return messagesWithinKeepAlive;
+        } else {
+            return getChunksWithDesiredQuantity(messagesWithinKeepAlive, quantity);
+        }
     }
 
-    private LinkedList<List<MessageWithTimestamp>> gatherOrderedChunksWithinKeepAliveForQuantity(Instant now, int quantity) {
+    private LinkedList<MessagesWithTimestamps> gatherOrderedChunksWithinKeepAliveForQuantity(Instant now, int quantity) {
 
-        LinkedList<List<MessageWithTimestamp>> orderedChunks = new LinkedList<>();
+        LinkedList<MessagesWithTimestamps> orderedChunks = new LinkedList<>();
         int chunksAccumulatedSize = 0;
 
         for (WithinKeepAliveBucketsIterator it = new WithinKeepAliveBucketsIterator(now);
-             chunksAccumulatedSize < quantity && it.hasNext();){
+             chunksAccumulatedSize < quantity && it.hasNext(); ) {
 
-            List<MessageWithTimestamp> messages = it.next().readMessages();
+            MessagesWithTimestamps messages = it.next().readMessages();
 
             if (!messages.isEmpty()) {
                 orderedChunks.addFirst(messages);
@@ -154,30 +171,23 @@ public class ConcurrentMessageStorage implements MessageStorage {
         return orderedChunks;
     }
 
-    private void dropExceededKeepAliveInOldestChunk(LinkedList<List<MessageWithTimestamp>> chunksWithinKeepAlive, Instant now) {
-        List<MessageWithTimestamp> oldestChunk = chunksWithinKeepAlive.pollFirst();
-        List<MessageWithTimestamp> oldestChunkWithOnlyKeepAliveMessages = dropMessagesExceedingKeepAlive(oldestChunk, lastAcceptableTimestampFor(now));
-        chunksWithinKeepAlive.addFirst(oldestChunkWithOnlyKeepAliveMessages);
-    }
+    private LinkedList<List<Message>> dropExceededKeepAliveInOldestChunk(LinkedList<MessagesWithTimestamps> chunksWithinKeepAlive, Instant now) {
 
-    private static LinkedList<List<MessageWithTimestamp>> getChunksWithDesiredQuantity(LinkedList<List<MessageWithTimestamp>> chunks, int desiredQuantity) {
-        LinkedList<List<MessageWithTimestamp>> result = new LinkedList<>();
+        if (chunksWithinKeepAlive.getFirst().mayContainMessagesWithExceededKeepAlive()) {
 
-        while (desiredQuantity > 0 && !chunks.isEmpty()) {
-            List<MessageWithTimestamp> currentChunk = chunks.pollLast();
+            List<Message> oldestChunkWithOnlyKeepAliveMessages = getMessagesOnlyInKeepAlive(chunksWithinKeepAlive.pollFirst(), lastAcceptableTimestampFor(now));
 
-            if (currentChunk.size() < desiredQuantity) {
-                result.addFirst(currentChunk);
-                desiredQuantity -= currentChunk.size();
-            } else {
-                result.addFirst(currentChunk.subList(currentChunk.size() - desiredQuantity, currentChunk.size()));
-                desiredQuantity = 0;
-            }
+            return concat(
+                    Stream.of(oldestChunkWithOnlyKeepAliveMessages),
+                    chunksWithinKeepAlive.stream().map(MessagesWithTimestamps::getMessages))
+                    .collect(toCollection(LinkedList::new));
+        } else {
+            return chunksWithinKeepAlive.stream()
+                    .map(MessagesWithTimestamps::getMessages)
+                    .collect(toCollection(LinkedList::new));
         }
 
-        return result;
     }
-
 
     private Instant lastAcceptableTimestampFor(Instant now) {
         return now.minus(keepAliveDuration);
@@ -198,55 +208,71 @@ public class ConcurrentMessageStorage implements MessageStorage {
         return Instant.ofEpochMilli(normalizedMillis);
     }
 
-    private static List<MessageWithTimestamp> dropMessagesExceedingKeepAlive(List<MessageWithTimestamp> messages, Instant oldestAcceptableTimestamp) {
+    private static LinkedList<List<Message>> getChunksWithDesiredQuantity(LinkedList<List<Message>> chunks, int desiredQuantity) {
+        final int chunksSummaryMessagesNumber = summaryMessageQuantity(chunks);
 
-        int idx = tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(messages, oldestAcceptableTimestamp);
-        idx = findFirstAcceptableMessageIdxSequentially(messages, idx, oldestAcceptableTimestamp);
+        List<Message> oldestChunk = chunks.pollFirst();
+
+        int summarySizeOfAllExceptOldest = chunksSummaryMessagesNumber - oldestChunk.size();
+        int messagesToTakeFromOldest = desiredQuantity - summarySizeOfAllExceptOldest;
+
+        if (messagesToTakeFromOldest > 0) {
+            chunks.addFirst(oldestChunk.subList(oldestChunk.size() - messagesToTakeFromOldest, oldestChunk.size()));
+        }
+
+        return chunks;
+    }
+
+    private static List<Message> getMessagesOnlyInKeepAlive(MessagesWithTimestamps messages, Instant oldestAcceptableTimestamp) {
+
+        int idx = tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(messages.getTimestamps(), oldestAcceptableTimestamp);
+        idx = findFirstAcceptableMessageIdxSequentially(messages.getTimestamps(), idx, oldestAcceptableTimestamp);
 
         if (idx >= 0 && idx < messages.size()) {
-            return messages.subList(idx, messages.size());
+            return messages.getMessages().subList(idx, messages.size());
         }
 
         return emptyList();
+
     }
 
-    private  static int tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(List<MessageWithTimestamp> messages, Instant lastAcceptable) {
-        if (messages.size() < BINARY_SEARCH_MIN_THRESHOLD) {
+    private static int tryFindNearestIdxToFirstAcceptableMessageUsingBinarySearch(List<Instant> timestamps, Instant lastAcceptable) {
+        if (timestamps.size() < BINARY_SEARCH_MIN_THRESHOLD) {
             return 0;
         }
 
         int estimatedIdx = BINARY_SEARCH_COMPARATORS.stream()
-                .mapToInt(comparator -> binarySearch(messages, binarySearchTimestamp(lastAcceptable), comparator))
+                .mapToInt(comparator -> binarySearch(timestamps, lastAcceptable, comparator))
                 .filter(idx -> idx >= 0)
                 .findFirst()
                 .orElse(0);
 
         // correct binary search errors
-        while (estimatedIdx > 0 && messages.get(estimatedIdx).timestamp.isAfter(lastAcceptable)) {
+        while (estimatedIdx > 0 && timestamps.get(estimatedIdx).isAfter(lastAcceptable)) {
             estimatedIdx--;
         }
 
         return estimatedIdx;
     }
 
-    private static int findFirstAcceptableMessageIdxSequentially(List<MessageWithTimestamp> messages, int startingIdx, Instant lastAcceptable) {
+    private static int findFirstAcceptableMessageIdxSequentially(List<Instant> timestamps, int startingIdx, Instant lastAcceptable) {
 
-        while (startingIdx < messages.size() && messages.get(startingIdx).timestamp.isBefore(lastAcceptable)) {
+        while (startingIdx < timestamps.size() && timestamps.get(startingIdx).isBefore(lastAcceptable)) {
             startingIdx++;
         }
 
         return startingIdx;
     }
 
-    private static Stream<Message> convertToMessagesStream(LinkedList<List<MessageWithTimestamp>> chunks) {
+    private static int summaryMessageQuantity(List<List<Message>> chunks) {
         return chunks.stream()
-                .flatMap(List::stream)
-                .map(MessageWithTimestamp::getMessage);
+                .mapToInt(List::size)
+                .sum();
     }
 
     //endregion
 
-    private class WithinKeepAliveBucketsIterator implements Iterator<BucketForReader> {
+    private final class WithinKeepAliveBucketsIterator implements Iterator<BucketForReader> {
 
         private final Instant oldestAcceptableBucketIdentifier;
         private Instant currentBucketIdentifier;
@@ -265,29 +291,35 @@ public class ConcurrentMessageStorage implements MessageStorage {
         public BucketForReader next() {
             currentBucketIdentifier = currentBucketIdentifier.minusMillis(BUCKET_TIME_GRANULARITY_IN_MILLIS);
             Bucket bucket = storageBuckets.get(currentBucketIdentifier);
-            return new BucketForReader(bucket);
+            return new BucketForReader(bucket, !hasNext());
         }
 
     }
 
-    private static class Bucket {
+    private static final class Bucket {
         public final StampedLock lock = new StampedLock();
 
         private final Instant identifier;
         private boolean isRememberedForCleanUp = false;
 
-        private ArrayList<MessageWithTimestamp> messages = new ArrayList<>(INITIAL_BUCKET_ARR_SIZE);
+        private final ArrayList<Message> messages = new ArrayList<>(INITIAL_BUCKET_ARR_SIZE);
+        private final ArrayList<Instant> timestamps = new ArrayList<>(INITIAL_BUCKET_ARR_SIZE);
 
         public Bucket(Instant identifier) {
             this.identifier = identifier;
         }
 
-        public List<MessageWithTimestamp> getMessages() {
-            return unmodifiableList(messages);
+        public List<Message> getMessages() {
+            return messages;
         }
 
-        public void addMessage(MessageWithTimestamp messageWithTimestamp) {
-            messages.add(messageWithTimestamp);
+        public ArrayList<Instant> getTimestamps() {
+            return timestamps;
+        }
+
+        public void addMessage(Message message, Instant timestamp) {
+            messages.add(message);
+            timestamps.add(timestamp);
         }
 
         public boolean isRememberedForCleanUp() {
@@ -306,33 +338,35 @@ public class ConcurrentMessageStorage implements MessageStorage {
         }
     }
 
-    private static class BucketForReader {
+    private static final class BucketForReader {
         private final Optional<Bucket> bucket;
+        private final boolean oldestBucketInQuery;
 
-        private BucketForReader(Bucket bucket) {
+        private BucketForReader(Bucket bucket, boolean oldestBucketInQuery) {
             this.bucket = ofNullable(bucket);
+            this.oldestBucketInQuery = oldestBucketInQuery;
         }
 
-        public List<MessageWithTimestamp> readMessages() {
+        public MessagesWithTimestamps readMessages() {
             return bucket
                     .map(this::readFromBucket)
-                    .orElseGet(Collections::emptyList);
+                    .orElse(MessagesWithTimestamps.EMPTY);
         }
 
-        private List<MessageWithTimestamp> readFromBucket(Bucket b) {
+        private MessagesWithTimestamps readFromBucket(Bucket b) {
 
             long stamp = b.lock.tryOptimisticRead();
 
-            List<MessageWithTimestamp> result = new ArrayList<>(b.getMessages());
+            MessagesWithTimestamps result = MessagesWithTimestamps.createForBucket(b, oldestBucketInQuery);
 
             if (!b.lock.validate(stamp)) {
 
-                try{
+                try {
                     stamp = b.lock.readLock();
 
-                    result = new ArrayList<>(b.getMessages());
+                    result = MessagesWithTimestamps.createForBucket(b, oldestBucketInQuery);
 
-                }finally {
+                } finally {
                     b.lock.unlockRead(stamp);
                 }
 
@@ -343,4 +377,48 @@ public class ConcurrentMessageStorage implements MessageStorage {
 
     }
 
+    private static final class MessagesWithTimestamps {
+        public static final MessagesWithTimestamps EMPTY = new MessagesWithTimestamps(emptyList(), emptyList(), false);
+
+
+        private final List<Message> messages;
+        private final List<Instant> timestamps;
+        private final boolean mayContainMessagesExceededKeepAlive;
+
+        private MessagesWithTimestamps(List<Message> messages, List<Instant> timestamps, boolean mayContainMessagesExceededKeepAlive) {
+            this.messages = messages;
+            this.timestamps = timestamps;
+            this.mayContainMessagesExceededKeepAlive = mayContainMessagesExceededKeepAlive;
+        }
+
+        public List<Message> getMessages() {
+            return messages;
+        }
+
+        public List<Instant> getTimestamps() {
+            return timestamps;
+        }
+
+        public boolean isEmpty() {
+            return messages.isEmpty();
+        }
+
+        public int size() {
+            return messages.size();
+        }
+
+        public boolean mayContainMessagesWithExceededKeepAlive() {
+            return mayContainMessagesExceededKeepAlive;
+        }
+
+        public static MessagesWithTimestamps createForBucket(Bucket bucket, boolean isOldestBucketInQuery) {
+            return new MessagesWithTimestamps(
+                    new ArrayList<>(bucket.getMessages()),
+                    isOldestBucketInQuery ? new ArrayList<>(bucket.getTimestamps()) : emptyList(),
+                    isOldestBucketInQuery);
+        }
+
+    }
+
 }
+
